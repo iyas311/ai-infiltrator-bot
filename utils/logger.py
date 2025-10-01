@@ -1,9 +1,7 @@
 import logging
 import sys
 
-
 _configured = False
-
 
 def configure_logging(level: int | None = None) -> None:
     global _configured
