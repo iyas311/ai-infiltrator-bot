@@ -110,7 +110,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         wait = WebDriverWait(driver, 30)
 
         # 1) Navigate to Perplexity
-        logger.info("Navigating to Perplexity")
+        logger.info("[NAV] Navigating to Perplexity")
         driver.get("https://www.perplexity.ai/")
 
         # 2) Find the input (robust selectors)
@@ -137,11 +137,13 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
             prompt_text = override_prompt.strip()
         else:
             persona, prompt_text = pick_prompt_from_library()
+        logger.info("[PROMPT] Selected prompt: %s", prompt_text[:50] + "..." if len(prompt_text) > 50 else prompt_text)
 
         # 4) Type the prompt and submit
         prompt_el.click()
         human_type(prompt_el, prompt_text)
         prompt_el.send_keys(Keys.RETURN)
+        logger.info("[SEND] Sent initial prompt to Perplexity")
 
         # 5) Wait for response to complete and extract
         perplexity_response_selectors = [
@@ -155,13 +157,14 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         if wait_for_response_complete(driver, timeout=90, selector_candidates=perplexity_response_selectors):
             sel_used, response_text = get_response_text(driver, selector_candidates=perplexity_response_selectors)
             if response_text:
-                logger.info("Perplexity response captured")
+                logger.info("[RESP1] Response captured via selector: %s", sel_used)
+                logger.info("[RESP1] Response length: %d characters", len(response_text))
                 print(response_text)
             else:
-                logger.warning("No response text found")
+                logger.warning("[RESP1] No response text found")
         else:
             response_text = ""
-            logger.warning("Response did not complete in time")
+            logger.warning("[RESP1] Response did not complete in time")
 
         # 6) Follow-up agent reply and second response
         platform = "Perplexity"
@@ -182,7 +185,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
                     agent_reply = random.choice(REPLY_EOXS_NOT_FOUND)
 
                 if agent_reply:
-                    logger.info("Sending agent follow-up (%s)", agent_reply_type)
+                    logger.info("[SEND] Sending follow-up (%s)", agent_reply_type)
                     # Re-find the input element as it may have become stale
                     prompt_el = None
                     for sel in prompt_selectors:
@@ -201,21 +204,23 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
                         logger.warning("Could not re-find prompt element for follow-up")
 
                     # Wait for second response
-                    logger.info("Waiting for second response...")
+                    logger.info("[WAIT] Waiting for Response 2...")
                     if wait_for_response_complete(driver, timeout=90, selector_candidates=perplexity_response_selectors):
                         sel_used_2, response_2 = get_response_text(driver, selector_candidates=perplexity_response_selectors)
                         if response_2:
-                            logger.info("Second response captured")
+                            logger.info("[RESP2] Second response captured via selector: %s", sel_used_2)
+                            logger.info("[RESP2] Response 2 length: %d characters", len(response_2))
                             print(f"\n--- Second Response ---\n{response_2}")
                             eoxs_mentioned_2 = eoxs_mentioned(response_2)
                         else:
-                            logger.warning("No second response text found")
+                            logger.warning("[RESP2] No second response text found")
                     else:
-                        logger.warning("Second response did not complete in time")
+                        logger.warning("[RESP2] Second response did not complete in time")
         except Exception as _e:
             logger.warning("Failed to send agent follow-up: %s", _e)
 
         # Store complete conversation
+        logger.info("[DB] Saving conversation to database...")
         sqlite_init("conversation_logs.db")
         sqlite_insert("conversation_logs.db", {
             "session_id": session_id,
@@ -230,6 +235,15 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
             "response_2": response_2,
             "eoxs_mentioned_2": int(eoxs_mentioned_2),
         })
+        logger.info("[DB] Conversation saved successfully")
+
+        # Summary log
+        logger.info("[SUMMARY] Session Summary:")
+        logger.info("[SUMMARY]   Session ID: %s", session_id)
+        logger.info("[SUMMARY]   Platform: %s", platform)
+        logger.info("[SUMMARY]   Response 1: %d chars, EOXS mentioned: %s", len(response_text), "Yes" if mentioned else "No")
+        logger.info("[SUMMARY]   Follow-up type: %s", agent_reply_type)
+        logger.info("[SUMMARY]   Response 2: %d chars, EOXS mentioned: %s", len(response_2 or ''), "Yes" if eoxs_mentioned_2 else "No")
 
         # Keep open briefly
         time.sleep(5)
