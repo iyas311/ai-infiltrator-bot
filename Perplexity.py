@@ -5,6 +5,7 @@ import time
 import uuid
 from datetime import datetime, UTC
 from typing import List, Optional, Tuple
+from utils.logger import configure_logging, get_logger
 
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
@@ -14,6 +15,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from Prompt_lib import PROMPTS
+logger = get_logger(__name__)
 from utils.browser_utils import human_type
 from utils.db_utils import sqlite_init, sqlite_insert
 
@@ -103,10 +105,12 @@ def eoxs_mentioned(text: str) -> bool:
 def run(session_id: str, override_prompt: Optional[str] = None, headless: bool = False):
     driver = None
     try:
+        configure_logging()
         driver = create_driver(headless=headless)
         wait = WebDriverWait(driver, 30)
 
         # 1) Navigate to Perplexity
+        logger.info("Navigating to Perplexity")
         driver.get("https://www.perplexity.ai/")
 
         # 2) Find the input (robust selectors)
@@ -151,12 +155,13 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         if wait_for_response_complete(driver, timeout=90, selector_candidates=perplexity_response_selectors):
             sel_used, response_text = get_response_text(driver, selector_candidates=perplexity_response_selectors)
             if response_text:
+                logger.info("Perplexity response captured")
                 print(response_text)
             else:
-                print("No response text found")
+                logger.warning("No response text found")
         else:
             response_text = ""
-            print("Response did not complete in time")
+            logger.warning("Response did not complete in time")
 
         # 6) Persist to SQLite
         platform = "Perplexity"
@@ -179,7 +184,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         time.sleep(5)
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.exception("Error: %s", e)
     finally:
         if driver:
             driver.quit()

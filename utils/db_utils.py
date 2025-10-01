@@ -1,5 +1,8 @@
 import sqlite3
 from typing import Dict
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def sqlite_init(db_path: str):
@@ -28,7 +31,7 @@ def sqlite_init(db_path: str):
                     pass
             conn.commit()
     except Exception as e:
-        print(f"SQLite init failed: {e}")
+        logger.exception("SQLite init failed: %s", e)
 
 
 def sqlite_insert(db_path: str, row: Dict):
@@ -53,7 +56,7 @@ def sqlite_insert(db_path: str, row: Dict):
             )
             conn.commit()
     except Exception as e:
-        print(f"SQLite insert failed: {e}")
+        logger.exception("SQLite insert failed: %s", e)
 
 
 

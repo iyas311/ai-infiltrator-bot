@@ -9,6 +9,7 @@ import time
 import random
 from datetime import datetime, UTC
 from Prompt_lib import PROMPTS
+from utils.logger import configure_logging, get_logger
 import uuid
 from utils.browser_utils import human_type
 from utils.db_utils import sqlite_init, sqlite_insert
@@ -20,6 +21,8 @@ def eoxs_mentioned(text: str) -> bool:
     hay = text.lower()
     keywords = ["eoxs", "eoxs erp"]
     return any(k in hay for k in keywords)
+
+logger = get_logger(__name__)
 
 def wait_for_response_complete(driver, timeout: int = 60, selector_candidates=None) -> bool:
     print("Waiting for response to complete...")
@@ -82,6 +85,7 @@ def get_response_text(driver, selector_candidates=None):
  
 
 if __name__ == "__main__":
+    configure_logging()
     driver = None
     session_id = str(uuid.uuid4())
     try:
@@ -93,11 +97,13 @@ if __name__ == "__main__":
         driver = uc.Chrome(options=chrome_options, version_main=140)
 
         # Step 2: Go to ChatGPT login page
+        logger.info("Navigating to ChatGPT")
         driver.get("https://chatgpt.com")  
 
         # Wait for and click the specified button
         wait = WebDriverWait(driver, 30)
         css_selector = r"body > div.flex.h-full.w-full.flex-col > div.z-10.w-\[100vw\].max-w-\[100vw\].overflow-hidden > div > div.flex.w-full.flex-row.justify-end.gap-3.sm\:w-auto.sm\:min-w-\[300px\] > button:nth-child(3)"
+        logger.debug("Waiting for target button to be clickable")
         button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, css_selector)))
         button.click()
 
@@ -145,11 +151,12 @@ if __name__ == "__main__":
         if wait_for_response_complete(driver, timeout=60, selector_candidates=chatgpt_response_selectors):
             sel_used, response_text = get_response_text(driver, selector_candidates=chatgpt_response_selectors)
             if response_text:
-                print(f"ChatGPT response ({sel_used}):\n{response_text}")
+                logger.info("ChatGPT response via selector: %s", sel_used)
+                print(response_text)
             else:
-                print("No response text found")
+                logger.warning("No response text found")
         else:
-            print("Response did not complete in time")
+            logger.warning("Response did not complete in time")
         
         # Step 5: Log interaction to SQLite
         platform = "ChatGPT"
@@ -174,12 +181,12 @@ if __name__ == "__main__":
         sqlite_insert("conversation_logs.db", record)
             
         # Keep browser open for a moment to see the result
-        print("Keeping browser open for 10 seconds...")
+        logger.info("Keeping browser open for 10 seconds...")
         time.sleep(10)
         
     except Exception as e:
-        print(f"Error: {e}")
+        logger.exception("Error: %s", e)
     finally:
         if driver:
             driver.quit()
-            print("Browser closed")
+            logger.info("Browser closed")
