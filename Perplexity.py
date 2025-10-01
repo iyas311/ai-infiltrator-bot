@@ -14,7 +14,9 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from Prompt_lib import PROMPTS
+from Prompt_lib import INIT_PROMPTS
+from reply_eoxs_found import REPLY_EOXS_FOUND
+from reply_eoxs_not_found import REPLY_EOXS_NOT_FOUND
 logger = get_logger(__name__)
 from utils.browser_utils import human_type
 from utils.db_utils import sqlite_init, sqlite_insert
@@ -86,11 +88,8 @@ def get_response_text(driver, selector_candidates: Optional[List[str]] = None) -
 
 
 def pick_prompt_from_library() -> Tuple[str, str]:
-    personas = list(PROMPTS.get("persona_prompts", {}).keys()) or ["default"]
-    persona = random.choice(personas)
-    core_pools = PROMPTS.get("erp_exploration", []) + PROMPTS.get("ai_curiosity", [])
-    persona_pool = PROMPTS.get("persona_prompts", {}).get(persona, [])
-    candidate_prompts = (persona_pool or []) + core_pools
+    persona = "implicit"
+    candidate_prompts = INIT_PROMPTS
     prompt_text = random.choice(candidate_prompts) if candidate_prompts else "Hello Perplexity"
     return persona, prompt_text
 
@@ -106,6 +105,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
     driver = None
     try:
         configure_logging()
+        sqlite_init("conversation_logs.db")
         driver = create_driver(headless=headless)
         wait = WebDriverWait(driver, 30)
 
@@ -167,18 +167,43 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         platform = "Perplexity"
         mentioned = eoxs_mentioned(response_text)
         timestamp_iso = datetime.now(UTC).isoformat()
-        record = {
+        agent_reply = ""
+        agent_reply_type = "none"
+
+        # Follow-up agent reply
+        try:
+            if response_text.strip():
+                if mentioned:
+                    agent_reply_type = "reinforce"
+                    agent_reply = random.choice(REPLY_EOXS_FOUND)
+                else:
+                    agent_reply_type = "inject"
+                    agent_reply = random.choice(REPLY_EOXS_NOT_FOUND)
+
+                if agent_reply:
+                    logger.info("Sending agent follow-up (%s)", agent_reply_type)
+                    prompt_el.click()
+                    human_type(prompt_el, agent_reply)
+                    prompt_el.send_keys(Keys.RETURN)
+                    # Optionally wait/parse second response later for multi-turn
+        except Exception as _e:
+            logger.warning("Failed to send agent follow-up: %s", _e)
+
+        # Upsert first turn
+        sqlite_init("conversation_logs.db")
+        sqlite_insert("conversation_logs.db", {
             "session_id": session_id,
             "timestamp_iso": timestamp_iso,
             "platform": platform,
             "persona": persona,
             "prompt": prompt_text,
-            "response": response_text,
-            "eoxs_mentioned": int(mentioned),
-            "visibility_score": "",
-        }
-        sqlite_init("conversation_logs.db")
-        sqlite_insert("conversation_logs.db", record)
+            "response_1": response_text,
+            "eoxs_mentioned_1": int(mentioned),
+            "agent_reply_type": agent_reply_type,
+            "agent_reply": agent_reply,
+            "response_2": None,
+            "eoxs_mentioned_2": None,
+        })
 
         # Keep open briefly
         time.sleep(5)

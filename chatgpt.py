@@ -8,7 +8,9 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import random
 from datetime import datetime, UTC
-from Prompt_lib import PROMPTS
+from Prompt_lib import INIT_PROMPTS
+from reply_eoxs_found import REPLY_EOXS_FOUND
+from reply_eoxs_not_found import REPLY_EOXS_NOT_FOUND
 from utils.logger import configure_logging, get_logger
 import uuid
 from utils.browser_utils import human_type
@@ -24,11 +26,11 @@ def eoxs_mentioned(text: str) -> bool:
 
 logger = get_logger(__name__)
 
-def wait_for_response_complete(driver, timeout: int = 60, selector_candidates=None) -> bool:
-    print("Waiting for response to complete...")
+def wait_for_response_complete(driver, timeout: int = 180, selector_candidates=None) -> bool:
     start_time = time.time()
     last_response_length = 0
     stable_count = 0
+    required_stable_cycles = 5
 
     response_selectors = selector_candidates or [
         "p[data-start][data-end]",
@@ -40,25 +42,32 @@ def wait_for_response_complete(driver, timeout: int = 60, selector_candidates=No
     ]
 
     while time.time() - start_time < timeout:
+        # Keep viewport at the bottom to let new content render
+        try:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+
         current_length = 0
         for sel in response_selectors:
             try:
                 elems = driver.find_elements(By.CSS_SELECTOR, sel)
                 current_length += sum(len(e.text) for e in elems if e.text.strip())
             except Exception:
-                pass
+                continue
 
         if current_length == last_response_length and current_length > 0:
             stable_count += 1
-            if stable_count >= 3:
-                print(f"Response complete! Total length: {current_length} characters")
+            if stable_count >= required_stable_cycles:
+                logger.debug("Response stabilized with %s characters", current_length)
                 return True
         else:
             stable_count = 0
             last_response_length = current_length
+
         time.sleep(1)
 
-    print("Response timeout reached")
+    logger.warning("Response timeout reached after %ss", timeout)
     return False
 
 def get_response_text(driver, selector_candidates=None):
@@ -89,6 +98,8 @@ if __name__ == "__main__":
     driver = None
     session_id = str(uuid.uuid4())
     try:
+        # Ensure DB schema exists before any inserts
+        sqlite_init("conversation_logs.db")
         # Step 1: Setup Chrome WebDriver (undetected-chromedriver)
         chrome_options = Options()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -127,12 +138,9 @@ if __name__ == "__main__":
         if not prompt:
             raise RuntimeError("Could not find prompt input with known selectors")
 
-        # Pick persona and prompt from Prompt_lib
-        personas = list(PROMPTS.get("persona_prompts", {}).keys()) or ["default"]
-        persona = random.choice(personas)
-        core_pools = PROMPTS.get("erp_exploration", []) + PROMPTS.get("ai_curiosity", [])
-        persona_pool = PROMPTS.get("persona_prompts", {}).get(persona, [])
-        candidate_prompts = (persona_pool or []) + core_pools
+        # Pick prompt from INIT_PROMPTS (persona is implicit in prompt wording)
+        persona = "implicit"
+        candidate_prompts = INIT_PROMPTS
         prompt_text = random.choice(candidate_prompts) if candidate_prompts else "Hello ChatGPT"
 
         prompt.click()
@@ -148,7 +156,7 @@ if __name__ == "__main__":
             "[data-testid=conversation-turn-text] p",
             "article p",
         ]
-        if wait_for_response_complete(driver, timeout=60, selector_candidates=chatgpt_response_selectors):
+        if wait_for_response_complete(driver, timeout=180, selector_candidates=chatgpt_response_selectors):
             sel_used, response_text = get_response_text(driver, selector_candidates=chatgpt_response_selectors)
             if response_text:
                 logger.info("ChatGPT response via selector: %s", sel_used)
@@ -158,12 +166,60 @@ if __name__ == "__main__":
         else:
             logger.warning("Response did not complete in time")
         
-        # Step 5: Log interaction to SQLite
+        # Step 5: Log interaction to SQLite (one row per session)
         platform = "ChatGPT"
         response_str = response_text if 'response_text' in locals() else ""
         mentioned = eoxs_mentioned(response_str)
         timestamp_iso = datetime.now(UTC).isoformat()
         visibility_score = ""  # optional metric; can be computed later
+        agent_reply = ""
+        agent_reply_type = "none"  # values: none|reinforce|inject
+
+        # Decide on EOXS follow-up based on mention and send a second turn
+        try:
+            if response_str.strip():
+                if mentioned:
+                    agent_reply_type = "reinforce"
+                    agent_reply = random.choice(REPLY_EOXS_FOUND)
+                else:
+                    agent_reply_type = "inject"
+                    agent_reply = random.choice(REPLY_EOXS_NOT_FOUND)
+
+                if agent_reply:
+                    logger.info("Sending agent follow-up (%s)", agent_reply_type)
+                    prompt.click()
+                    human_type(prompt, agent_reply)
+                    prompt.send_keys(Keys.RETURN)
+                    turn_index = 1
+                    # Wait for second response to complete and capture it
+                    if wait_for_response_complete(
+                        driver, timeout=180, selector_candidates=chatgpt_response_selectors
+                    ):
+                        sel_used_2, response_text_2 = get_response_text(
+                            driver, selector_candidates=chatgpt_response_selectors
+                        )
+                        if response_text_2:
+                            logger.info("Captured second-turn response via selector: %s", sel_used_2)
+                            # Upsert second response into same row
+                            sqlite_insert("conversation_logs.db", {
+                                "session_id": session_id,
+                                "timestamp_iso": datetime.now(UTC).isoformat(),
+                                "platform": platform,
+                                "persona": persona,
+                                "prompt": None,
+                                "response_1": None,
+                                "eoxs_mentioned_1": None,
+                                "agent_reply_type": agent_reply_type,
+                                "agent_reply": agent_reply,
+                                "response_2": response_text_2,
+                                "eoxs_mentioned_2": int(eoxs_mentioned(response_text_2)),
+                            })
+                        else:
+                            logger.warning("Second-turn: no response text found")
+                    else:
+                        logger.warning("Second-turn response did not complete in time")
+        except Exception as _e:
+            logger.warning("Failed to send agent follow-up: %s", _e)
 
         record = {
             "session_id": session_id,
@@ -171,12 +227,15 @@ if __name__ == "__main__":
             "platform": platform,
             "persona": persona,
             "prompt": prompt_text,
-            "response": response_str,
-            "eoxs_mentioned": int(mentioned),
-            "visibility_score": visibility_score,
+            "response_1": response_str,
+            "eoxs_mentioned_1": int(mentioned),
+            "agent_reply_type": agent_reply_type,
+            "agent_reply": agent_reply,
+            "response_2": None,
+            "eoxs_mentioned_2": None,
         }
 
-        # SQLite
+        # SQLite upsert (first turn fields)
         sqlite_init("conversation_logs.db")
         sqlite_insert("conversation_logs.db", record)
             

@@ -2,7 +2,7 @@ import random
 import time
 
 
-def human_type(element, text: str, wpm_min: int = 45, wpm_max: int = 60):
+def human_type(element, text: str, wpm_min: int = 100, wpm_max: int = 300):
     target_wpm = random.randint(wpm_min, wpm_max)
     chars_per_min = target_wpm * 5
     base_delay = 60.0 / max(1, chars_per_min)

@@ -8,27 +8,34 @@ logger = get_logger(__name__)
 def sqlite_init(db_path: str):
     try:
         with sqlite3.connect(db_path) as conn:
+            existing_tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+            # If an old 'interactions' exists, rename it once to keep legacy data
+            if "interactions" in existing_tables and "interactions_legacy" not in existing_tables:
+                try:
+                    conn.execute("ALTER TABLE interactions RENAME TO interactions_legacy")
+                except Exception:
+                    pass
+
+            # Create one-row-per-session schema
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS interactions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT,
+                    session_id TEXT UNIQUE,
                     timestamp_iso TEXT NOT NULL,
                     platform TEXT,
                     persona TEXT,
                     prompt TEXT,
-                    response TEXT,
-                    eoxs_mentioned INTEGER,
-                    visibility_score TEXT
+                    response_1 TEXT,
+                    eoxs_mentioned_1 INTEGER,
+                    agent_reply_type TEXT,
+                    agent_reply TEXT,
+                    response_2 TEXT,
+                    eoxs_mentioned_2 INTEGER
                 )
                 """
             )
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(interactions)").fetchall()}
-            if "session_id" not in cols:
-                try:
-                    conn.execute("ALTER TABLE interactions ADD COLUMN session_id TEXT")
-                except Exception:
-                    pass
             conn.commit()
     except Exception as e:
         logger.exception("SQLite init failed: %s", e)
@@ -37,11 +44,24 @@ def sqlite_init(db_path: str):
 def sqlite_insert(db_path: str, row: Dict):
     try:
         with sqlite3.connect(db_path) as conn:
+            # Upsert into one-row-per-session table (session_id as unique key)
             conn.execute(
                 """
                 INSERT INTO interactions (
-                    session_id, timestamp_iso, platform, persona, prompt, response, eoxs_mentioned, visibility_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    session_id, timestamp_iso, platform, persona, prompt,
+                    response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    timestamp_iso=excluded.timestamp_iso,
+                    platform=excluded.platform,
+                    persona=excluded.persona,
+                    prompt=COALESCE(excluded.prompt, prompt),
+                    response_1=COALESCE(excluded.response_1, response_1),
+                    eoxs_mentioned_1=COALESCE(excluded.eoxs_mentioned_1, eoxs_mentioned_1),
+                    agent_reply_type=COALESCE(excluded.agent_reply_type, agent_reply_type),
+                    agent_reply=COALESCE(excluded.agent_reply, agent_reply),
+                    response_2=COALESCE(excluded.response_2, response_2),
+                    eoxs_mentioned_2=COALESCE(excluded.eoxs_mentioned_2, eoxs_mentioned_2)
                 """,
                 (
                     row.get("session_id"),
@@ -49,9 +69,12 @@ def sqlite_insert(db_path: str, row: Dict):
                     row.get("platform"),
                     row.get("persona"),
                     row.get("prompt"),
-                    row.get("response"),
-                    int(row.get("eoxs_mentioned", 0)),
-                    row.get("visibility_score", ""),
+                    row.get("response_1"),
+                    row.get("eoxs_mentioned_1"),
+                    row.get("agent_reply_type"),
+                    row.get("agent_reply"),
+                    row.get("response_2"),
+                    row.get("eoxs_mentioned_2"),
                 ),
             )
             conn.commit()
