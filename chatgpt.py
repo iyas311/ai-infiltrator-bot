@@ -7,50 +7,36 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
 import random
-import csv
 from datetime import datetime, UTC
 from Prompt_lib import PROMPTS
-import json
-import sqlite3
 import uuid
+from utils.browser_utils import human_type
+from utils.db_utils import sqlite_init, sqlite_insert
 
-# Human-like typing helper (40–50 WPM)
-def human_type(element, text: str, wpm_min: int = 40, wpm_max: int = 50):
-    target_wpm = random.randint(wpm_min, wpm_max)
-    chars_per_min = target_wpm * 5
-    base_delay = 60.0 / max(1, chars_per_min)
-    for ch in text:
-        element.send_keys(ch)
-        delay = random.uniform(base_delay * 0.7, base_delay * 1.5)
-        if ch in ",.;":
-            delay += random.uniform(0.05, 0.12)
-        if ch in "!?":
-            delay += random.uniform(0.08, 0.18)
-        if ch == " ":
-            delay += random.uniform(0.02, 0.08)
-        # Occasional micro-pause
-        if random.random() < 0.03:
-            delay += random.uniform(0.1, 0.25)
-        time.sleep(delay)
 
-def wait_for_response_complete(driver, timeout: int = 60):
-    """Wait for response to be fully generated (no more streaming)"""
+def eoxs_mentioned(text: str) -> bool:
+    if not text:
+        return False
+    hay = text.lower()
+    keywords = ["eoxs", "eoxs erp"]
+    return any(k in hay for k in keywords)
+
+def wait_for_response_complete(driver, timeout: int = 60, selector_candidates=None) -> bool:
     print("Waiting for response to complete...")
     start_time = time.time()
     last_response_length = 0
     stable_count = 0
-    
+
+    response_selectors = selector_candidates or [
+        "p[data-start][data-end]",
+        "div[data-message-author-role=assistant] p",
+        "div.markdown p",
+        "div.prose p",
+        "[data-testid=conversation-turn-text] p",
+        "article p",
+    ]
+
     while time.time() - start_time < timeout:
-        # Check for response elements
-        response_selectors = [
-            "p[data-start][data-end]",
-            "div[data-message-author-role=assistant] p",
-            "div.markdown p",
-            "div.prose p",
-            "[data-testid=conversation-turn-text] p",
-            "article p"
-        ]
-        
         current_length = 0
         for sel in response_selectors:
             try:
@@ -58,8 +44,7 @@ def wait_for_response_complete(driver, timeout: int = 60):
                 current_length += sum(len(e.text) for e in elems if e.text.strip())
             except Exception:
                 pass
-        
-        # If response length hasn't changed for 3 consecutive checks, consider it complete
+
         if current_length == last_response_length and current_length > 0:
             stable_count += 1
             if stable_count >= 3:
@@ -68,24 +53,21 @@ def wait_for_response_complete(driver, timeout: int = 60):
         else:
             stable_count = 0
             last_response_length = current_length
-            
         time.sleep(1)
-    
+
     print("Response timeout reached")
     return False
 
-def get_response_text(driver):
-    """Extract response text using multiple selectors"""
-    response_selector_candidates = [
+def get_response_text(driver, selector_candidates=None):
+    candidates = selector_candidates or [
         "p[data-start][data-end]",
         "div[data-message-author-role=assistant] p",
         "div.markdown p",
         "div.prose p",
         "[data-testid=conversation-turn-text] p",
-        "article p"
+        "article p",
     ]
-    
-    for sel in response_selector_candidates:
+    for sel in candidates:
         try:
             elems = driver.find_elements(By.CSS_SELECTOR, sel)
             if elems and any(e.text.strip() for e in elems):
@@ -95,108 +77,9 @@ def get_response_text(driver):
             continue
     return None, ""
 
-def eoxs_mentioned(text: str) -> bool:
-    if not text:
-        return False
-    hay = text.lower()
-    keywords = ["eoxs", "eoxs erp"]
-    return any(k in hay for k in keywords)
+ 
 
-def append_csv_row(file_path: str, row: dict):
-    fieldnames = [
-        "session_id",
-        "timestamp_iso",
-        "platform",
-        "persona",
-        "prompt",
-        "response",
-        "eoxs_mentioned",
-        "visibility_score"
-    ]
-    try:
-        file_exists = False
-        try:
-            with open(file_path, mode="r", encoding="utf-8", newline="") as _f:
-                file_exists = True
-        except FileNotFoundError:
-            file_exists = False
-
-        with open(file_path, mode="a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
-    except Exception as e:
-        print(f"CSV write failed: {e}")
-
-def append_json_array(file_path: str, row: dict):
-    try:
-        data = []
-        try:
-            with open(file_path, mode="r", encoding="utf-8") as f:
-                data = json.load(f) or []
-        except FileNotFoundError:
-            data = []
-        except json.JSONDecodeError:
-            data = []
-        data.append(row)
-        with open(file_path, mode="w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"JSON write failed: {e}")
-
-def sqlite_init(db_path: str):
-    try:
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS interactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT,
-                    timestamp_iso TEXT NOT NULL,
-                    platform TEXT,
-                    persona TEXT,
-                    prompt TEXT,
-                    response TEXT,
-                    eoxs_mentioned INTEGER,
-                    visibility_score TEXT
-                )
-                """
-            )
-            # Add session_id column if missing (for existing DBs)
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(interactions)").fetchall()}
-            if "session_id" not in cols:
-                try:
-                    conn.execute("ALTER TABLE interactions ADD COLUMN session_id TEXT")
-                except Exception:
-                    pass
-            conn.commit()
-    except Exception as e:
-        print(f"SQLite init failed: {e}")
-
-def sqlite_insert(db_path: str, row: dict):
-    try:
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO interactions (
-                    session_id, timestamp_iso, platform, persona, prompt, response, eoxs_mentioned, visibility_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row.get("session_id"),
-                    row.get("timestamp_iso"),
-                    row.get("platform"),
-                    row.get("persona"),
-                    row.get("prompt"),
-                    row.get("response"),
-                    int(row.get("eoxs_mentioned", 0)),
-                    row.get("visibility_score", ""),
-                ),
-            )
-            conn.commit()
-    except Exception as e:
-        print(f"SQLite insert failed: {e}")
+ 
 
 if __name__ == "__main__":
     driver = None
@@ -206,7 +89,8 @@ if __name__ == "__main__":
         chrome_options = Options()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--start-maximized")
-        driver = uc.Chrome(options=chrome_options)
+        # Match installed Chrome major version to avoid driver mismatch errors
+        driver = uc.Chrome(options=chrome_options, version_main=140)
 
         # Step 2: Go to ChatGPT login page
         driver.get("https://chatgpt.com")  
@@ -249,9 +133,17 @@ if __name__ == "__main__":
         human_type(prompt, prompt_text)
         prompt.send_keys(Keys.RETURN)
 
-        # Step 4: Wait for response to complete, then extract
-        if wait_for_response_complete(driver, timeout=60):
-            sel_used, response_text = get_response_text(driver)
+        # Step 4: Wait for response to complete, then extract (ChatGPT selectors)
+        chatgpt_response_selectors = [
+            "p[data-start][data-end]",
+            "div[data-message-author-role=assistant] p",
+            "div.markdown p",
+            "div.prose p",
+            "[data-testid=conversation-turn-text] p",
+            "article p",
+        ]
+        if wait_for_response_complete(driver, timeout=60, selector_candidates=chatgpt_response_selectors):
+            sel_used, response_text = get_response_text(driver, selector_candidates=chatgpt_response_selectors)
             if response_text:
                 print(f"ChatGPT response ({sel_used}):\n{response_text}")
             else:
@@ -259,7 +151,7 @@ if __name__ == "__main__":
         else:
             print("Response did not complete in time")
         
-        # Step 5: Log interaction to CSV (per specifications.txt)
+        # Step 5: Log interaction to SQLite
         platform = "ChatGPT"
         response_str = response_text if 'response_text' in locals() else ""
         mentioned = eoxs_mentioned(response_str)
@@ -276,12 +168,6 @@ if __name__ == "__main__":
             "eoxs_mentioned": int(mentioned),
             "visibility_score": visibility_score,
         }
-
-        # CSV
-        append_csv_row("conversation_logs.csv", record)
-
-        # JSON (append into array)
-        append_json_array("conversation_logs.json", record)
 
         # SQLite
         sqlite_init("conversation_logs.db")
