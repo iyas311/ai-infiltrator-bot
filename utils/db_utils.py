@@ -36,23 +36,45 @@ def sqlite_init(db_path: str):
                 )
                 """
             )
-            # Migrate data from legacy table if it exists (without thread_id)
+            # Migrate data from legacy table if it exists (handle old schema)
             if "interactions_legacy" in existing_tables:
                 try:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO interactions (
-                            session_id, timestamp_iso, platform, persona, prompt,
-                            response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                    # Check what columns exist in the legacy table
+                    legacy_cols = {r[1] for r in conn.execute("PRAGMA table_info(interactions_legacy)").fetchall()}
+                    
+                    # Map old columns to new schema
+                    if "response" in legacy_cols and "response_1" not in legacy_cols:
+                        # Old schema: response -> response_1
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO interactions (
+                                session_id, timestamp_iso, platform, persona, prompt,
+                                response_1, eoxs_mentioned_1, agent_reply_type, agent_reply
+                            )
+                            SELECT 
+                                session_id, timestamp_iso, platform, persona, prompt,
+                                response, eoxs_mentioned, agent_reply_type, agent_reply
+                            FROM interactions_legacy
+                            WHERE session_id IS NOT NULL
+                            """
                         )
-                        SELECT 
-                            session_id, timestamp_iso, platform, persona, prompt,
-                            response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
-                        FROM interactions_legacy
-                        WHERE session_id IS NOT NULL
-                        """
-                    )
+                    else:
+                        # New schema already
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO interactions (
+                                session_id, timestamp_iso, platform, persona, prompt,
+                                response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                            )
+                            SELECT 
+                                session_id, timestamp_iso, platform, persona, prompt,
+                                response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                            FROM interactions_legacy
+                            WHERE session_id IS NOT NULL
+                            """
+                        )
                     conn.execute("DROP TABLE interactions_legacy")
+                    logger.info("Successfully migrated legacy data")
                 except Exception as e:
                     logger.warning("Failed to migrate legacy data: %s", e)
             conn.commit()
