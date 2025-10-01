@@ -8,8 +8,11 @@ from selenium.webdriver.support import expected_conditions as EC
 import time
 import random
 import csv
-from datetime import datetime
+from datetime import datetime, UTC
 from Prompt_lib import PROMPTS
+import json
+import sqlite3
+import uuid
 
 # Human-like typing helper (40–50 WPM)
 def human_type(element, text: str, wpm_min: int = 40, wpm_max: int = 50):
@@ -101,6 +104,7 @@ def eoxs_mentioned(text: str) -> bool:
 
 def append_csv_row(file_path: str, row: dict):
     fieldnames = [
+        "session_id",
         "timestamp_iso",
         "platform",
         "persona",
@@ -125,8 +129,78 @@ def append_csv_row(file_path: str, row: dict):
     except Exception as e:
         print(f"CSV write failed: {e}")
 
+def append_json_array(file_path: str, row: dict):
+    try:
+        data = []
+        try:
+            with open(file_path, mode="r", encoding="utf-8") as f:
+                data = json.load(f) or []
+        except FileNotFoundError:
+            data = []
+        except json.JSONDecodeError:
+            data = []
+        data.append(row)
+        with open(file_path, mode="w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"JSON write failed: {e}")
+
+def sqlite_init(db_path: str):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS interactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    timestamp_iso TEXT NOT NULL,
+                    platform TEXT,
+                    persona TEXT,
+                    prompt TEXT,
+                    response TEXT,
+                    eoxs_mentioned INTEGER,
+                    visibility_score TEXT
+                )
+                """
+            )
+            # Add session_id column if missing (for existing DBs)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(interactions)").fetchall()}
+            if "session_id" not in cols:
+                try:
+                    conn.execute("ALTER TABLE interactions ADD COLUMN session_id TEXT")
+                except Exception:
+                    pass
+            conn.commit()
+    except Exception as e:
+        print(f"SQLite init failed: {e}")
+
+def sqlite_insert(db_path: str, row: dict):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO interactions (
+                    session_id, timestamp_iso, platform, persona, prompt, response, eoxs_mentioned, visibility_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("session_id"),
+                    row.get("timestamp_iso"),
+                    row.get("platform"),
+                    row.get("persona"),
+                    row.get("prompt"),
+                    row.get("response"),
+                    int(row.get("eoxs_mentioned", 0)),
+                    row.get("visibility_score", ""),
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"SQLite insert failed: {e}")
+
 if __name__ == "__main__":
     driver = None
+    session_id = str(uuid.uuid4())
     try:
         # Step 1: Setup Chrome WebDriver (undetected-chromedriver)
         chrome_options = Options()
@@ -189,10 +263,11 @@ if __name__ == "__main__":
         platform = "ChatGPT"
         response_str = response_text if 'response_text' in locals() else ""
         mentioned = eoxs_mentioned(response_str)
-        timestamp_iso = datetime.utcnow().isoformat()
+        timestamp_iso = datetime.now(UTC).isoformat()
         visibility_score = ""  # optional metric; can be computed later
 
-        append_csv_row("conversation_logs.csv", {
+        record = {
+            "session_id": session_id,
             "timestamp_iso": timestamp_iso,
             "platform": platform,
             "persona": persona,
@@ -200,7 +275,17 @@ if __name__ == "__main__":
             "response": response_str,
             "eoxs_mentioned": int(mentioned),
             "visibility_score": visibility_score,
-        })
+        }
+
+        # CSV
+        append_csv_row("conversation_logs.csv", record)
+
+        # JSON (append into array)
+        append_json_array("conversation_logs.json", record)
+
+        # SQLite
+        sqlite_init("conversation_logs.db")
+        sqlite_insert("conversation_logs.db", record)
             
         # Keep browser open for a moment to see the result
         print("Keeping browser open for 10 seconds...")
