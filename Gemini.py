@@ -13,6 +13,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from Prompt_lib import INIT_PROMPTS
+from reply_eoxs_found import REPLY_EOXS_FOUND
+from reply_eoxs_not_found import REPLY_EOXS_NOT_FOUND
 from utils.logger import configure_logging, get_logger
 from utils.browser_utils import human_type
 from utils.db_utils import sqlite_init, sqlite_insert
@@ -35,11 +37,13 @@ def wait_for_response_complete(driver, timeout: int = 90, selector_candidates: O
 
     # Gemini renders answers inside rich text/markdown-ish containers; use paragraph-based selectors
     response_selectors = selector_candidates or [
+        "div[class*='response']",  # This one worked for second response
+        "div[data-message-author-role='model']",
+        "div[class*='model-turn']",
         "div[class*='prose'] p",
         "div[class*='markdown'] p",
         "article p",
         "main p",
-        # Google Gemini sometimes uses data attributes
         "[data-md] p",
         "[data-message-author-role='model'] p",
     ]
@@ -49,7 +53,16 @@ def wait_for_response_complete(driver, timeout: int = 90, selector_candidates: O
         for sel in response_selectors:
             try:
                 elems = driver.find_elements(By.CSS_SELECTOR, sel)
-                current_length += sum(len(e.text) for e in elems if e.text.strip())
+                if elems:
+                    # Find the element with the most text
+                    best_length = 0
+                    for elem in elems:
+                        text = elem.text.strip()
+                        if len(text) > best_length and len(text) > 50:
+                            best_length = len(text)
+                    if best_length > current_length:
+                        current_length = best_length
+                        break  # Use the first selector that finds substantial content
             except Exception:
                 pass
 
@@ -67,20 +80,43 @@ def wait_for_response_complete(driver, timeout: int = 90, selector_candidates: O
 
 def get_response_text(driver, selector_candidates: Optional[List[str]] = None) -> Tuple[Optional[str], str]:
     candidates = selector_candidates or [
+        # Try more generic selectors that might work for Gemini
+        "div[role='presentation']",
+        "div[class*='conversation']",
+        "div[class*='message']",
+        "div[class*='content']",
+        "div[class*='text']",
+        "div[data-message-author-role='model']",
+        "div[class*='model-turn']",
+        "div[class*='response']",
         "div[class*='prose'] p",
         "div[class*='markdown'] p",
         "article p",
         "main p",
         "[data-md] p",
         "[data-message-author-role='model'] p",
+        # Fallback to any div with substantial text
+        "div",
     ]
     for sel in candidates:
         try:
             elems = driver.find_elements(By.CSS_SELECTOR, sel)
-            if elems and any(e.text.strip() for e in elems):
-                response_text = "\n".join([e.text for e in elems if e.text.strip()])
-                return sel, response_text
-        except Exception:
+            if elems:
+                # Get all elements and find the one with the most text
+                best_elem = None
+                best_length = 0
+                for elem in elems:
+                    text = elem.text.strip()
+                    if len(text) > best_length and len(text) > 50:
+                        best_elem = elem
+                        best_length = len(text)
+                
+                if best_elem:
+                    response_text = best_elem.text.strip()
+                    logger.info(f"Found response with selector '{sel}', length: {len(response_text)}")
+                    return sel, response_text
+        except Exception as e:
+            logger.debug(f"Selector '{sel}' failed: {e}")
             continue
     return None, ""
 
@@ -141,6 +177,9 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
 
         # 5) Wait for response to complete and extract
         gemini_response_selectors = [
+            "div[class*='response']",  # This one worked for second response
+            "div[data-message-author-role='model']",
+            "div[class*='model-turn']",
             "div[class*='prose'] p",
             "div[class*='markdown'] p",
             "article p",
@@ -148,30 +187,95 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
             "[data-md] p",
             "[data-message-author-role='model'] p",
         ]
-        if wait_for_response_complete(driver, timeout=90, selector_candidates=gemini_response_selectors):
-            sel_used, response_text = get_response_text(driver, selector_candidates=gemini_response_selectors)
-            if response_text:
-                logger.info("Gemini response captured")
-                print(response_text)
+        # Wait longer for Gemini response and try multiple times
+        response_text = ""
+        for attempt in range(3):
+            if wait_for_response_complete(driver, timeout=60, selector_candidates=gemini_response_selectors):
+                sel_used, response_text = get_response_text(driver, selector_candidates=gemini_response_selectors)
+                if response_text and len(response_text) > 200:  # Ensure substantial content
+                    logger.info("Gemini response captured")
+                    print(response_text)
+                    break
+                else:
+                    logger.warning(f"Attempt {attempt + 1}: Response too short or empty, retrying...")
+                    time.sleep(5)
             else:
-                logger.warning("No response text found")
-        else:
+                logger.warning(f"Attempt {attempt + 1}: Response did not complete in time, retrying...")
+                time.sleep(5)
+        
+        if not response_text or len(response_text) <= 200:
+            logger.warning("No substantial response text found after all attempts")
             response_text = ""
-            logger.warning("Response did not complete in time")
+
+        # Decide follow-up based on prompt mentioning EOXS
+        prompt_mentions_eoxs = "eoxs" in (prompt_text or "").lower()
+        agent_reply_type = "reinforce" if prompt_mentions_eoxs else "inject"
+        agent_reply = random.choice(REPLY_EOXS_FOUND if prompt_mentions_eoxs else REPLY_EOXS_NOT_FOUND)
+
+        # Send follow-up and capture second response
+        response_2 = ""
+        eoxs_mentioned_1 = int(eoxs_mentioned(response_text))
+        eoxs_mentioned_2 = 0
+        try:
+            if agent_reply:
+                logger.info("Sending agent follow-up (%s)", agent_reply_type)
+                # Re-find editor in case of DOM changes
+                editor = None
+                for sel in prompt_selectors:
+                    try:
+                        editor = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, sel)))
+                        if editor:
+                            break
+                    except Exception:
+                        continue
+                if editor:
+                    editor.click()
+                    human_type(editor, agent_reply)
+                    editor.send_keys(Keys.RETURN)
+
+                    logger.info("Waiting for second response...")
+                    # Wait a bit for the new response to start appearing
+                    time.sleep(5)
+                    
+                    # Try multiple times for second response
+                    for attempt in range(3):
+                        if wait_for_response_complete(driver, timeout=60, selector_candidates=gemini_response_selectors):
+                            sel_used_2, response_2 = get_response_text(driver, selector_candidates=gemini_response_selectors)
+                            if response_2 and len(response_2) > 200 and response_2 != response_text:
+                                logger.info("Second response captured")
+                                print(f"\n--- Second Response ---\n{response_2}")
+                                eoxs_mentioned_2 = int(eoxs_mentioned(response_2))
+                                break
+                            else:
+                                logger.warning(f"Attempt {attempt + 1}: Second response too short, same as first, or empty, retrying...")
+                                time.sleep(5)
+                        else:
+                            logger.warning(f"Attempt {attempt + 1}: Second response did not complete in time, retrying...")
+                            time.sleep(5)
+                    else:
+                        logger.warning("No distinct second response found after all attempts")
+                        response_2 = ""
+                else:
+                    logger.warning("Could not re-find prompt editor for follow-up")
+        except Exception as _e:
+            logger.warning("Failed to send agent follow-up: %s", _e)
 
         # 6) Persist to SQLite
+        # Persist two-turn conversation (same schema as Perplexity)
         sqlite_init("conversation_logs.db")
-        record = {
+        sqlite_insert("conversation_logs.db", {
             "session_id": session_id,
             "timestamp_iso": datetime.now(UTC).isoformat(),
             "platform": "Gemini",
             "persona": persona,
             "prompt": prompt_text,
-            "response": response_text,
-            "eoxs_mentioned": int(eoxs_mentioned(response_text)),
-            "visibility_score": "",
-        }
-        sqlite_insert("conversation_logs.db", record)
+            "response_1": response_text,
+            "eoxs_mentioned_1": eoxs_mentioned_1,
+            "agent_reply_type": agent_reply_type,
+            "agent_reply": agent_reply,
+            "response_2": response_2,
+            "eoxs_mentioned_2": eoxs_mentioned_2,
+        })
 
         # Keep window visible a moment
         time.sleep(5)

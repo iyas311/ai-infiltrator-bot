@@ -163,14 +163,15 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
             response_text = ""
             logger.warning("Response did not complete in time")
 
-        # 6) Persist to SQLite
+        # 6) Follow-up agent reply and second response
         platform = "Perplexity"
         mentioned = eoxs_mentioned(response_text)
         timestamp_iso = datetime.now(UTC).isoformat()
         agent_reply = ""
         agent_reply_type = "none"
+        response_2 = ""
+        eoxs_mentioned_2 = False
 
-        # Follow-up agent reply
         try:
             if response_text.strip():
                 if mentioned:
@@ -182,14 +183,39 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
 
                 if agent_reply:
                     logger.info("Sending agent follow-up (%s)", agent_reply_type)
-                    prompt_el.click()
-                    human_type(prompt_el, agent_reply)
-                    prompt_el.send_keys(Keys.RETURN)
-                    # Optionally wait/parse second response later for multi-turn
+                    # Re-find the input element as it may have become stale
+                    prompt_el = None
+                    for sel in prompt_selectors:
+                        try:
+                            prompt_el = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, sel)))
+                            if prompt_el:
+                                break
+                        except Exception:
+                            continue
+                    
+                    if prompt_el:
+                        prompt_el.click()
+                        human_type(prompt_el, agent_reply)
+                        prompt_el.send_keys(Keys.RETURN)
+                    else:
+                        logger.warning("Could not re-find prompt element for follow-up")
+
+                    # Wait for second response
+                    logger.info("Waiting for second response...")
+                    if wait_for_response_complete(driver, timeout=90, selector_candidates=perplexity_response_selectors):
+                        sel_used_2, response_2 = get_response_text(driver, selector_candidates=perplexity_response_selectors)
+                        if response_2:
+                            logger.info("Second response captured")
+                            print(f"\n--- Second Response ---\n{response_2}")
+                            eoxs_mentioned_2 = eoxs_mentioned(response_2)
+                        else:
+                            logger.warning("No second response text found")
+                    else:
+                        logger.warning("Second response did not complete in time")
         except Exception as _e:
             logger.warning("Failed to send agent follow-up: %s", _e)
 
-        # Upsert first turn
+        # Store complete conversation
         sqlite_init("conversation_logs.db")
         sqlite_insert("conversation_logs.db", {
             "session_id": session_id,
@@ -201,8 +227,8 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
             "eoxs_mentioned_1": int(mentioned),
             "agent_reply_type": agent_reply_type,
             "agent_reply": agent_reply,
-            "response_2": None,
-            "eoxs_mentioned_2": None,
+            "response_2": response_2,
+            "eoxs_mentioned_2": int(eoxs_mentioned_2),
         })
 
         # Keep open briefly
