@@ -26,11 +26,14 @@ def eoxs_mentioned(text: str) -> bool:
 
 logger = get_logger(__name__)
 
-def wait_for_response_complete(driver, timeout: int = 180, selector_candidates=None) -> bool:
+def wait_for_response_complete(driver, timeout: int = 75, selector_candidates=None) -> bool:
     start_time = time.time()
-    last_response_length = 0
+    last_change_time = start_time
+    last_length = 0
     stable_count = 0
-    required_stable_cycles = 5
+    required_stable_cycles = 3
+    idle_grace_seconds = 4  # allow brief gap before we start checking idle
+    max_idle_seconds = 7    # if no growth for this long (after grace), consider done
 
     response_selectors = selector_candidates or [
         "p[data-start][data-end]",
@@ -41,7 +44,13 @@ def wait_for_response_complete(driver, timeout: int = 180, selector_candidates=N
         "article p",
     ]
 
-    while time.time() - start_time < timeout:
+    while True:
+        now = time.time()
+        elapsed = now - start_time
+        if elapsed > timeout:
+            logger.warning("Response timeout reached after %ss", timeout)
+            return last_length > 0
+
         # Keep viewport at the bottom to let new content render
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -56,19 +65,24 @@ def wait_for_response_complete(driver, timeout: int = 180, selector_candidates=N
             except Exception:
                 continue
 
-        if current_length == last_response_length and current_length > 0:
-            stable_count += 1
-            if stable_count >= required_stable_cycles:
-                logger.debug("Response stabilized with %s characters", current_length)
-                return True
-        else:
+        if current_length > last_length:
+            last_change_time = now
+            last_length = current_length
             stable_count = 0
-            last_response_length = current_length
+        elif current_length > 0:
+            stable_count += 1
 
-        time.sleep(1)
+        # Early finish if content present and idle too long after grace
+        if last_length > 0 and (now - start_time) > idle_grace_seconds and (now - last_change_time) > max_idle_seconds:
+            logger.debug("Finishing due to idle: chars=%s idle=%ss", last_length, int(now - last_change_time))
+            return True
 
-    logger.warning("Response timeout reached after %ss", timeout)
-    return False
+        # Or if a few consecutive stable cycles reached with content
+        if last_length > 0 and stable_count >= required_stable_cycles:
+            logger.debug("Finishing due to stability: chars=%s cycles=%s", last_length, stable_count)
+            return True
+
+        time.sleep(0.8)
 
 def get_response_text(driver, selector_candidates=None):
     candidates = selector_candidates or [
@@ -156,7 +170,7 @@ if __name__ == "__main__":
             "[data-testid=conversation-turn-text] p",
             "article p",
         ]
-        if wait_for_response_complete(driver, timeout=180, selector_candidates=chatgpt_response_selectors):
+        if wait_for_response_complete(driver, timeout=75, selector_candidates=chatgpt_response_selectors):
             sel_used, response_text = get_response_text(driver, selector_candidates=chatgpt_response_selectors)
             if response_text:
                 logger.info("ChatGPT response via selector: %s", sel_used)
@@ -193,7 +207,7 @@ if __name__ == "__main__":
                     turn_index = 1
                     # Wait for second response to complete and capture it
                     if wait_for_response_complete(
-                        driver, timeout=180, selector_candidates=chatgpt_response_selectors
+                        driver, timeout=75, selector_candidates=chatgpt_response_selectors
                     ):
                         sel_used_2, response_text_2 = get_response_text(
                             driver, selector_candidates=chatgpt_response_selectors

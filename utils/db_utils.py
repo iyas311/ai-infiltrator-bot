@@ -17,7 +17,7 @@ def sqlite_init(db_path: str):
                 except Exception:
                     pass
 
-            # Create one-row-per-session schema
+            # Create one-row-per-session schema (no thread_id)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS interactions (
@@ -36,6 +36,25 @@ def sqlite_init(db_path: str):
                 )
                 """
             )
+            # Migrate data from legacy table if it exists (without thread_id)
+            if "interactions_legacy" in existing_tables:
+                try:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO interactions (
+                            session_id, timestamp_iso, platform, persona, prompt,
+                            response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                        )
+                        SELECT 
+                            session_id, timestamp_iso, platform, persona, prompt,
+                            response_1, eoxs_mentioned_1, agent_reply_type, agent_reply, response_2, eoxs_mentioned_2
+                        FROM interactions_legacy
+                        WHERE session_id IS NOT NULL
+                        """
+                    )
+                    conn.execute("DROP TABLE interactions_legacy")
+                except Exception as e:
+                    logger.warning("Failed to migrate legacy data: %s", e)
             conn.commit()
     except Exception as e:
         logger.exception("SQLite init failed: %s", e)
