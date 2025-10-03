@@ -78,7 +78,7 @@ def wait_for_response_complete(driver, timeout: int = 90, selector_candidates: O
     return False
 
 
-def get_response_text(driver, selector_candidates: Optional[List[str]] = None) -> Tuple[Optional[str], str]:
+def get_response_text(driver, selector_candidates: Optional[List[str]] = None, get_latest: bool = False) -> Tuple[Optional[str], str]:
     candidates = selector_candidates or [
         # Try more generic selectors that might work for Gemini
         "div[role='presentation']",
@@ -102,19 +102,29 @@ def get_response_text(driver, selector_candidates: Optional[List[str]] = None) -
         try:
             elems = driver.find_elements(By.CSS_SELECTOR, sel)
             if elems:
-                # Get all elements and find the one with the most text
-                best_elem = None
-                best_length = 0
-                for elem in elems:
-                    text = elem.text.strip()
-                    if len(text) > best_length and len(text) > 50:
-                        best_elem = elem
-                        best_length = len(text)
-                
-                if best_elem:
-                    response_text = best_elem.text.strip()
-                    logger.info(f"Found response with selector '{sel}', length: {len(response_text)}")
-                    return sel, response_text
+                if get_latest:
+                    # Get the LAST element (most recent response)
+                    # Filter elements with substantial text content
+                    valid_elems = [elem for elem in elems if elem.text.strip() and len(elem.text.strip()) > 50]
+                    if valid_elems:
+                        best_elem = valid_elems[-1]  # Last element in DOM
+                        response_text = best_elem.text.strip()
+                        logger.info(f"Found latest response with selector '{sel}', length: {len(response_text)}")
+                        return sel, response_text
+                else:
+                    # Get the element with the most text (original logic for Response 1)
+                    best_elem = None
+                    best_length = 0
+                    for elem in elems:
+                        text = elem.text.strip()
+                        if len(text) > best_length and len(text) > 50:
+                            best_elem = elem
+                            best_length = len(text)
+                    
+                    if best_elem:
+                        response_text = best_elem.text.strip()
+                        logger.info(f"Found longest response with selector '{sel}', length: {len(response_text)}")
+                        return sel, response_text
         except Exception as e:
             logger.debug(f"Selector '{sel}' failed: {e}")
             continue
@@ -193,7 +203,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
         response_text = ""
         for attempt in range(3):
             if wait_for_response_complete(driver, timeout=60, selector_candidates=gemini_response_selectors):
-                sel_used, response_text = get_response_text(driver, selector_candidates=gemini_response_selectors)
+                sel_used, response_text = get_response_text(driver, selector_candidates=gemini_response_selectors, get_latest=False)
                 if response_text and len(response_text) > 200:  # Ensure substantial content
                     logger.info("[RESP1] Response captured via selector: %s", sel_used)
                     logger.info("[RESP1] Response 1 length: %d characters", len(response_text))
@@ -243,7 +253,7 @@ def run(session_id: str, override_prompt: Optional[str] = None, headless: bool =
                     # Try multiple times for second response
                     for attempt in range(3):
                         if wait_for_response_complete(driver, timeout=60, selector_candidates=gemini_response_selectors):
-                            sel_used_2, response_2 = get_response_text(driver, selector_candidates=gemini_response_selectors)
+                            sel_used_2, response_2 = get_response_text(driver, selector_candidates=gemini_response_selectors, get_latest=True)
                             if response_2 and len(response_2) > 200 and response_2 != response_text:
                                 logger.info("[RESP2] Second response captured via selector: %s", sel_used_2)
                                 logger.info("[RESP2] Response 2 length: %d characters", len(response_2))
